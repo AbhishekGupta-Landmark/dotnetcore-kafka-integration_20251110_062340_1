@@ -1,24 +1,42 @@
+using Azure.Messaging.ServiceBus;
+using System;
+using System.Threading.Tasks;
+
 namespace Api
 {
-    using Confluent.Kafka;
-    using System;
-    using System.Threading;
     public class ConsumerWrapper
     {
         private string _topicName;
-        private ConsumerConfig _consumerConfig;
-        private Consumer<string,string> _consumer;
-        private static readonly Random rand = new Random();
-        public ConsumerWrapper(ConsumerConfig config,string topicName)
+        private ServiceBusClient _client;
+        private ServiceBusProcessor _processor;
+
+        public ConsumerWrapper(string connectionString, string topicName)
         {
             this._topicName = topicName;
-            this._consumerConfig = config;
-            this._consumer = new Consumer<string,string>(this._consumerConfig);
-            this._consumer.Subscribe(topicName);
+            this._client = new ServiceBusClient(connectionString);
+            this._processor = _client.CreateProcessor(topicName);
         }
-        public string readMessage(){
-            var consumeResult = this._consumer.Consume();
-            return consumeResult.Value;
+
+        public async Task<string> ReadMessageAsync()
+        {
+            string message = null;
+            _processor.ProcessMessageAsync += async (ProcessMessageEventArgs args) => 
+            {
+                message = args.Message.Body.ToString();
+                await args.CompleteMessageAsync(args.Message);
+            };
+
+            await _processor.StartProcessingAsync();
+
+            // Wait for message
+            while (message == null)
+            {
+                await Task.Delay(100);
+            }
+
+            await _processor.StopProcessingAsync();
+
+            return message;
         }
     }
 }

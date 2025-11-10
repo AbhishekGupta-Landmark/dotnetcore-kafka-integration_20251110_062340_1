@@ -1,32 +1,37 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Hosting;
+using Azure.Messaging.ServiceBus;
+using Newtonsoft.Json;
+using Api.Models;
+
 namespace Api.Services
 {
-    using Microsoft.Extensions.Hosting;
-    using System.Threading;
-    using System.Threading.Tasks;
-    using System;
-    using Api.Models;
-    using Newtonsoft.Json;
-    using Confluent.Kafka;
-
     public class ProcessOrdersService : BackgroundService
     {
-        private readonly ConsumerConfig consumerConfig;
-        private readonly ProducerConfig producerConfig;
-        public ProcessOrdersService(ConsumerConfig consumerConfig, ProducerConfig producerConfig)
+        private readonly ServiceBusClient _serviceBusClient;
+        private readonly string _inputQueueName;
+        private readonly string _outputQueueName;
+
+        public ProcessOrdersService(ServiceBusClient serviceBusClient)
         {
-            this.producerConfig = producerConfig;
-            this.consumerConfig = consumerConfig;
+            _serviceBusClient = serviceBusClient;
+            _inputQueueName = "orderrequests";
+            _outputQueueName = "readytoship";
         }
+
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Console.WriteLine("OrderProcessing Service Started");
-            
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                var consumerHelper = new ConsumerWrapper(consumerConfig, "orderrequests");
-                string orderRequest = consumerHelper.readMessage();
 
-                //Deserilaize 
+            var processor = _serviceBusClient.CreateProcessor(_inputQueueName);
+
+            processor.ProcessMessageAsync += async (ProcessMessageEventArgs args) =>
+            {
+                string orderRequest = args.Message.Body.ToString();
+
+                //Deserialize
                 OrderRequest order = JsonConvert.DeserializeObject<OrderRequest>(orderRequest);
 
                 //TODO:: Process Order
@@ -34,10 +39,27 @@ namespace Api.Services
                 order.status = OrderStatus.COMPLETED;
 
                 //Write to ReadyToShip Queue
+                var sender = _serviceBusClient.CreateSender(_outputQueueName);
+                var message = new ServiceBusMessage(JsonConvert.SerializeObject(order));
+                await sender.SendMessageAsync(message);
 
-                var producerWrapper = new ProducerWrapper(producerConfig,"readytoship");
-                await producerWrapper.writeMessage(JsonConvert.SerializeObject(order));
+                await args.CompleteMessageAsync(args.Message);
+            };
+
+            processor.ProcessErrorAsync += (ProcessErrorEventArgs args) =>
+            {
+                Console.WriteLine($"Error: {args.Exception.Message}");
+                return Task.CompletedTask;
+            };
+
+            await processor.StartProcessingAsync(stoppingToken);
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(1000, stoppingToken);
             }
+
+            await processor.StopProcessingAsync(stoppingToken);
         }
     }
 }
